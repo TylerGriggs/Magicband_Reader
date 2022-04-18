@@ -24,10 +24,12 @@
 #define STAPSK  "YOUR_PASSWORD_HERE"    // your network password
 #endif
 
-
-
 // Init RGB strip
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_PIXELS, LEDPIN, NEO_GRB + NEO_KHZ800);
+uint32_t hourColor = strip.Color(0, 255, 0);
+uint32_t minuteColor = strip.Color(0, 0, 255);
+uint32_t secondColor = strip.Color(255, 0, 0);
+uint32_t off = strip.Color(0, 0, 0);
 // Init RFID Reader
 MFRC522 mfrc522(SS_PIN, RST_PIN);       // Create MFRC522 instance
 // Init WIFI
@@ -35,11 +37,13 @@ WiFiUDP Udp;
 const char * ssid = STASSID; 
 const char * pass = STAPSK;
 static const char ntpServerName[] = "us.pool.ntp.org";
-const int timeZone = -5;                // Eastern Standard Time (USA)
+const int timeZone = -4;                // Eastern Standard Time (USA)
 unsigned int localPort = 8888;          // local port to listen for UDP packets
 const int NTP_PACKET_SIZE = 48;         // NTP time is in the first 48 bytes of message
 byte packetBuffer[NTP_PACKET_SIZE];     //buffer to hold incoming & outgoing packets
 time_t getNtpTime();
+time_t t;
+time_t prevDisplay = 0; // when the digital clock was last displayed
 
 
 void setup() {
@@ -47,26 +51,23 @@ void setup() {
   SPI.begin();            // Init SPI bus
   mfrc522.PCD_Init();     // Init MFRC522
   delay(4);               // Optional delay. Some board do need more time after init to be ready, see Readme
-
   strip.begin();          // Init LED strip
   strip.setBrightness(BRIGHTNESS);
   strip.show(); 
-  
-  
 
   randomSeed(analogRead(0));  // Seed Random with a number (Voltage) from unconnected pin
   
-  pinMode(D0, OUTPUT);     // LED Pin
-  pinMode(D1, OUTPUT);     // Soundboard Trigger Pin
+  pinMode(D0, OUTPUT);        // LED Pin
+  pinMode(D1, OUTPUT);        // Soundboard Trigger Pin
   digitalWrite(D0, LOW);
-  digitalWrite(D1, HIGH);  // Sound is triggered when connected to ground (low voltage)
+  digitalWrite(D1, HIGH);     // Sound is triggered when connected to ground (low voltage)
   
   while (WiFi.status() != WL_CONNECTED) {
       delay(50);
     }
   Udp.begin(localPort);
   setSyncProvider(getNtpTime);
-  setSyncInterval(300); // Syncs Time from NTP every 5 mins (300 seconds)
+  setSyncInterval(300);       // Syncs Time from NTP every 5 mins (300 seconds)
 
 }
 
@@ -75,6 +76,27 @@ void loop() {
   // Reset the loop if no new card present on the sensor/reader. This saves the entire process when idle.
   if ( ! mfrc522.PICC_IsNewCardPresent()) 
   {
+    if (timeStatus() != timeNotSet) {
+      t = now();                  // Now() is equivalent to the Epoch in seconds right now
+      if (t != prevDisplay) {     // update the display only if time has changed
+        uint16_t hour12 = hour(t);
+        if (hour12>=12){hour12 = hour12-12;}
+
+        // If You wrapped your LEDs Clockwise
+        //strip.setPixelColor(hour12 * 5, hourColor);
+        //strip.setPixelColor(minute(t), minuteColor);
+        //strip.setPixelColor(second(t), secondColor);
+
+        // If you wrapped your LEDs Counter-Clockwise
+        strip.setPixelColor(59- hour12 * 5, hourColor);
+        strip.setPixelColor(59- minute(t), minuteColor);
+        strip.setPixelColor(59- second(t), secondColor);
+        
+        strip.show();
+        prevDisplay = t;
+        resetStrip();
+        }
+      }
     return;
   }
   // Select one of the cards
@@ -117,7 +139,6 @@ void loop() {
 
 void streakSpin(int r, int g, int b) {
   uint32_t c = strip.Color(r, g, b);
-  uint32_t off = strip.Color(0, 0, 0);
   uint16_t streakSize = OUTER_RING/2;                   // Number of LEDs in Outer moving streak
   uint16_t innerStreakSize = INNER_RING/10;             // Number of LEDs in Inner moving streak
   uint16_t delaySpeed = 10;                             // Speed of Streaks
@@ -148,9 +169,7 @@ void streakSpin(int r, int g, int b) {
       innerLoc++;
       
       // Reset Streak calculation by theoretically turning "off" all the pixels again (before updating again)
-      for(uint16_t i=0; i<strip.numPixels(); i++) {
-        strip.setPixelColor(i, off);
-        }
+      resetStrip();
       }
       
     delaySpeed = delaySpeed - 2;                        // Speed Up
@@ -158,7 +177,11 @@ void streakSpin(int r, int g, int b) {
     } // Repeat Streaks
   } // End streakSpin()
 
-
+void resetStrip(){
+  for(uint16_t i=0; i<strip.numPixels(); i++) {
+        strip.setPixelColor(i, off);
+        }
+  }
 
 void fadeUp(int r, int g, int b) {
   uint32_t c;
@@ -196,18 +219,13 @@ time_t getNtpTime()
   IPAddress ntpServerIP; // NTP server's ip address
 
   while (Udp.parsePacket() > 0) ; // discard any previously received packets
-  Serial.println("Transmit NTP Request");
   // get a random server from the pool
   WiFi.hostByName(ntpServerName, ntpServerIP);
-  Serial.print(ntpServerName);
-  Serial.print(": ");
-  Serial.println(ntpServerIP);
   sendNTPpacket(ntpServerIP);
   uint32_t beginWait = millis();
   while (millis() - beginWait < 1500) {
     int size = Udp.parsePacket();
     if (size >= NTP_PACKET_SIZE) {
-      Serial.println("Receive NTP Response");
       Udp.read(packetBuffer, NTP_PACKET_SIZE);  // read packet into the buffer
       unsigned long secsSince1900;
       // convert four bytes starting at location 40 to a long integer
@@ -215,20 +233,9 @@ time_t getNtpTime()
       secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
       secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
       secsSince1900 |= (unsigned long)packetBuffer[43];
-      //flash_green();
       return secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR;
     }
   }
-  Serial.println("No NTP Response :-(");
-  display.clearDisplay();
-  display.setTextSize(1);      // Normal 1:1 pixel scale
-  display.setTextColor(SSD1306_WHITE); // Draw white text
-  display.setCursor(0, 0);     // Start at top-left corner
-  // digital clock display of the time
-  Serial.print(hour());
-  display.println("No NTP Response :-(");
-  display.display();
-  //flash_red();
   return 0; // return 0 if unable to get the time
 }
 
@@ -253,5 +260,4 @@ void sendNTPpacket(IPAddress &address)
   Udp.beginPacket(address, 123); //NTP requests are to port 123
   Udp.write(packetBuffer, NTP_PACKET_SIZE);
   Udp.endPacket();
-  //flash_yellow();
 }
