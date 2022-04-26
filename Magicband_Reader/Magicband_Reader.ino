@@ -7,6 +7,7 @@
 #include <MFRC522.h>
 #include <time.h>
 #include <TimeLib.h>
+#include <Timezone_Generic.h>
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 
@@ -14,14 +15,16 @@
 #define SS_PIN          D4          // RFID PIN
 #define SOUND_PIN       D1          // Sound Trigger when set to LOW
 #define LEDPIN          D2          // LED Pin on controller
+#define TRIGGER_PIN     10          // Manual Trigger Button Pin when LOW
 #define BRIGHTNESS 240
 #define OUTER_RING 60
 #define INNER_RING 50
 #define NUM_PIXELS 110    // TOTAL of Outer Ring + Inner Ring
+#define WIFI_TIMEOUT    15000       // 15 seconds before bypassing WIFI and clock feature
 
 #ifndef STASSID
-#define STASSID "YOUR_SSID_HERE"        // your network SSID (name) 
-#define STAPSK  "YOUR_PASSWORD_HERE"    // your network password
+#define STASSID "NETWORK_SSID"          // your network SSID (name) 
+#define STAPSK  "NETWORK_PASSWORD"      // your network password
 #endif
 
 // Init RGB strip
@@ -30,6 +33,11 @@ uint32_t hourColor = strip.Color(0, 255, 0);
 uint32_t minuteColor = strip.Color(0, 0, 255);
 uint32_t secondColor = strip.Color(255, 0, 0);
 uint32_t off = strip.Color(0, 0, 0);
+uint32_t yellowColor = strip.Color(240, 80, 0);
+
+int lastState = HIGH;                 // the previous state from the input pin
+int currentState;                     // the current reading from the input pin
+
 // Init RFID Reader
 MFRC522 mfrc522(SS_PIN, RST_PIN);       // Create MFRC522 instance
 // Init WIFI
@@ -37,14 +45,20 @@ WiFiUDP Udp;
 const char * ssid = STASSID; 
 const char * pass = STAPSK;
 static const char ntpServerName[] = "us.pool.ntp.org";
-const int timeZone = -4;                // Eastern Standard Time (USA)
+const int timeZone = 0;                 // UTC (Eastern is -4 Daylight, -5 Standard) Change if not using timezone.h
 unsigned int localPort = 8888;          // local port to listen for UDP packets
 const int NTP_PACKET_SIZE = 48;         // NTP time is in the first 48 bytes of message
-byte packetBuffer[NTP_PACKET_SIZE];     //buffer to hold incoming & outgoing packets
+byte packetBuffer[NTP_PACKET_SIZE];     // buffer to hold incoming & outgoing packets
+bool foundWIFI = false;
+
 time_t getNtpTime();
 time_t t;
-time_t prevDisplay = 0; // when the digital clock was last displayed
+time_t prevDisplay = 0;                 // when the clock was last displayed
 
+// US Eastern Time Zone (New York, Detroit)
+TimeChangeRule usEDT = {"EDT", Second, Sun, Mar, 2, -240};  //UTC - 4 hours
+TimeChangeRule usEST = {"EST", First, Sun, Nov, 2, -300};   //UTC - 5 hours
+Timezone usEastern(usEDT, usEST);
 
 void setup() {
   WiFi.begin(ssid, pass);
@@ -57,18 +71,25 @@ void setup() {
 
   randomSeed(analogRead(0));  // Seed Random with a number (Voltage) from unconnected pin
   
-  pinMode(D0, OUTPUT);        // LED Pin
-  pinMode(D1, OUTPUT);        // Soundboard Trigger Pin
-  digitalWrite(D0, LOW);
-  digitalWrite(D1, HIGH);     // Sound is triggered when connected to ground (low voltage)
-  
-  while (WiFi.status() != WL_CONNECTED) {
-      delay(50);
-    }
-  Udp.begin(localPort);
-  setSyncProvider(getNtpTime);
-  setSyncInterval(300);       // Syncs Time from NTP every 5 mins (300 seconds)
+  pinMode(TRIGGER_PIN, INPUT_PULLUP);   // Manual Trigger Pin wired to ground
+  pinMode(SOUND_PIN, OUTPUT);           // Soundboard Trigger Pin
+  digitalWrite(SOUND_PIN, HIGH);        // Sound is triggered when connected to ground (low voltage)
 
+  // Searching for WIFI
+  delay(20);
+  int timeout = 0;
+  while (WiFi.status() != WL_CONNECTED && timeout < WIFI_TIMEOUT) {
+      delay(10);
+      timeout = timeout + 10;
+    }
+  // If WIFI is found, connect
+  if (timeout < WIFI_TIMEOUT) {
+    Udp.begin(localPort);
+    foundWIFI = true;
+    setSyncProvider(getNtpTime);
+    setSyncInterval(600);       // Syncs Time from NTP every 10 mins (600 seconds)
+    }  
+  
 }
 
 void loop() {
@@ -76,27 +97,42 @@ void loop() {
   // Reset the loop if no new card present on the sensor/reader. This saves the entire process when idle.
   if ( ! mfrc522.PICC_IsNewCardPresent()) 
   {
-    if (timeStatus() != timeNotSet) {
+    // Check if Manual Button Trigger is pressed
+    currentState = digitalRead(TRIGGER_PIN);
+    delay(10);
+    if(lastState == LOW && currentState == HIGH){
+        // Show the Magicband Animation for manual trigger
+        magicbandReader();
+      }
+    // save the last state of the button
+    lastState = currentState;
+      
+    if (timeStatus() != timeNotSet && foundWIFI == true) {
       t = now();                  // Now() is equivalent to the Epoch in seconds right now
+
+      // Using Timezone.h convert to Eastern Standard/Daylight Time  /////////////////////
+      t = usEastern.toLocal(t);   // Comment Out if not on EST/EDT
+      
       if (t != prevDisplay) {     // update the display only if time has changed
         uint16_t hour12 = hour(t);
         if (hour12>=12){hour12 = hour12-12;}
 
         // If You wrapped your LEDs Clockwise
-        //strip.setPixelColor(hour12 * 5, hourColor);
-        //strip.setPixelColor(minute(t), minuteColor);
         //strip.setPixelColor(second(t), secondColor);
+        //strip.setPixelColor(minute(t), minuteColor);
+        //strip.setPixelColor(hour12 * 5, hourColor);
 
-        // If you wrapped your LEDs Counter-Clockwise
-        strip.setPixelColor(59- hour12 * 5, hourColor);
-        strip.setPixelColor(59- minute(t), minuteColor);
+        // If you wrapped your LEDs Counter-Clockwise (like me, whoops)
         strip.setPixelColor(59- second(t), secondColor);
+        strip.setPixelColor(59- minute(t), minuteColor);
+        strip.setPixelColor(59- hour12 * 5, hourColor);
         
         strip.show();
         prevDisplay = t;
         resetStrip();
         }
       }
+    
     return;
   }
   // Select one of the cards
@@ -106,11 +142,18 @@ void loop() {
   }
   
   // This code runs when a new RFID signal is detected
-  // Pick one of the Magicband Reader colors
+  // Show the Magicband Animation
+  magicbandReader();
+  
+} // End Loop
+
+void magicbandReader() {
   int red = 0;
   int green = 0;
   int blue = 0;
   int mod = random(300, 5000) % 3;
+
+  // Pick one of the Magicband Reader colors
   switch(mod) {
     case 0:   // White
       red = 255;
@@ -135,7 +178,8 @@ void loop() {
   digitalWrite(D1, HIGH);
   fadeDown(red, green, blue);
   
-} // End Loop
+} // End magicbandReader()
+
 
 void streakSpin(int r, int g, int b) {
   uint32_t c = strip.Color(r, g, b);
@@ -177,11 +221,13 @@ void streakSpin(int r, int g, int b) {
     } // Repeat Streaks
   } // End streakSpin()
 
+
 void resetStrip(){
   for(uint16_t i=0; i<strip.numPixels(); i++) {
         strip.setPixelColor(i, off);
         }
   }
+
 
 void fadeUp(int r, int g, int b) {
   uint32_t c;
@@ -198,6 +244,7 @@ void fadeUp(int r, int g, int b) {
     }
   }
 
+
 void fadeDown(int r, int g, int b) {
   uint32_t c;
   for (int pad = 0; pad <= 255; pad++){ 
@@ -212,6 +259,15 @@ void fadeDown(int r, int g, int b) {
     delay(10);
     }
   }
+
+
+void colorWipe(uint32_t color) {
+  for(int i=0; i<OUTER_RING; i++) { // For each pixel in strip...
+    strip.setPixelColor(i, color);         //  Set pixel's color
+    strip.show();                          //  Update strip to match
+    delay(1);                           //  Pause for a moment
+  }
+}
 
 /*-------- NTP Functions ----------*/
 time_t getNtpTime()
